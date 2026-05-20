@@ -2,16 +2,26 @@ package dax
 
 import (
 	"bytes"
+	goctx "context"
+	"fmt"
 	"io"
 	"log"
 	"net"
 	"os"
 	"os/signal"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 )
+
+// SO_REUSEPORT allows multiple processes to bind to the same address.
+// Value is 15 on Linux (from <netinet/tcp.h> or <bits/socket.h>).
+const soReusePort = 0x0F
+
+// EnvPreforkChild is the environment variable set on prefork child processes.
+const EnvPreforkChild = "DAX_PREFORK_CHILD"
 
 // Server is the interface for an HTTP server.
 type Server interface {
@@ -21,6 +31,7 @@ type Server interface {
 	Patch(path string, handler Handler)
 	Post(path string, handler Handler)
 	Put(path string, handler Handler)
+	Prefork()
 	Ready() chan struct{}
 	Request(method string, path string, headers []Header, body io.Reader) Response
 	Router() *Router[Handler]
@@ -34,6 +45,7 @@ type Server interface {
 type server struct {
 	handlers     []Handler
 	contextPool  sync.Pool
+	prefork      bool
 	router       *Router[Handler]
 	errorHandler func(Context, error)
 	ready        chan struct{}
@@ -122,15 +134,114 @@ func (s *server) Request(method string, url string, headers []Header, body io.Re
 	return ctx.Response()
 }
 
+// Prefork enables multi-process prefork mode using SO_REUSEPORT.
+// When enabled, the server forks one child process per GOMAXPROCS
+// and the kernel load-balances connections across them.
+func (s *server) Prefork() {
+	s.prefork = true
+}
+
+// logStartup prints server startup info.
+func (s *server) logStartup(address string, isChild bool, childIndex, totalChildren int) {
+	if !isChild {
+		println(`
+       ░██                       
+       ░██                       
+ ░████████  ░██████   ░██    ░██ 
+░██    ░██       ░██   ░██  ░██  
+░██    ░██  ░███████    ░█████   
+░██   ░███ ░██   ░██   ░██  ░██  
+ ░█████░██  ░█████░██ ░██    ░██    v1.0
+--------------------------------------------------
+`)
+		fmt.Println("  Listening on    ", address)
+		if s.prefork {
+			fmt.Println("  Prefork          Enabled")
+		} else {
+			fmt.Println("  Prefork          Disabled")
+		}
+		fmt.Println("  Processes       ", totalChildren)
+		fmt.Print("  PID:             ", os.Getpid())
+	} else {
+		fmt.Print(",", os.Getpid())
+		if childIndex >= totalChildren {
+			println("\n\n")
+		}
+	}
+}
+
 // Run starts the server on the given address.
 func (s *server) Run(address string) error {
-	listener, err := net.Listen("tcp", address)
+	if s.prefork && os.Getenv(EnvPreforkChild) == "" {
+		return s.runPrefork(address)
+	}
+
+	return s.runSingle(address)
+}
+
+// runPrefork forks child processes with SO_REUSEPORT.
+func (s *server) runPrefork(address string) error {
+	numCPU := runtime.GOMAXPROCS(0)
+	childProcs := make([]*os.Process, 0, numCPU)
+
+	s.logStartup(address, false, 0, numCPU)
+
+	for i := 0; i < numCPU; i++ {
+		env := os.Environ()
+		env = append(env, fmt.Sprintf("%s=%d", EnvPreforkChild, i+1))
+
+		proc, err := os.StartProcess(os.Args[0], os.Args, &os.ProcAttr{
+			Env:   env,
+			Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
+		})
+		if err != nil {
+			return fmt.Errorf("dax: prefork failed to start child %d: %w", i+1, err)
+		}
+		childProcs = append(childProcs, proc)
+	}
+
+	// Wait for all children to exit
+	for _, proc := range childProcs {
+		proc.Wait()
+	}
+
+	return nil
+}
+
+// runSingle runs the server in a single process (normal or prefork child).
+func (s *server) runSingle(address string) error {
+	var listener net.Listener
+	var err error
+
+	isChild := os.Getenv(EnvPreforkChild)
+	childIndex := 0
+	totalChildren := 0
+
+	if s.prefork && isChild != "" {
+		childIndex, _ = strconv.Atoi(isChild)
+		totalChildren = runtime.GOMAXPROCS(0)
+
+		config := &net.ListenConfig{
+			Control: func(network, address string, c syscall.RawConn) error {
+				return c.Control(func(fd uintptr) {
+					syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+					syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, soReusePort, 1)
+				})
+			},
+		}
+
+		listener, err = config.Listen(goctx.Background(), "tcp", address)
+	} else {
+		listener, err = net.Listen("tcp", address)
+	}
 
 	if err != nil {
 		return err
 	}
 
 	defer listener.Close()
+
+	s.logStartup(address, isChild != "", childIndex, totalChildren)
 
 	go func() {
 		for {
@@ -152,8 +263,6 @@ func (s *server) Run(address string) error {
 	case <-stop:
 	case <-s.stop:
 	}
-
-	listener.Close()
 
 	return nil
 }
