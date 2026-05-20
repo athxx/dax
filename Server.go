@@ -26,6 +26,7 @@ type Server interface {
 	Router() *Router[Handler]
 	Run(address string) error
 	SetErrorHandler(handler func(Context, error))
+	Stop()
 	Use(handlers ...Handler)
 }
 
@@ -36,6 +37,8 @@ type server struct {
 	router       *Router[Handler]
 	errorHandler func(Context, error)
 	ready        chan struct{}
+	stop         chan struct{}
+	bufferPool   sync.Pool // 用于复用 bytes.Buffer，减少 GC 压力
 }
 
 // NewServer creates a new HTTP server.
@@ -59,6 +62,10 @@ func NewServer() Server {
 			log.Println(ctx.Request().Path(), err)
 		},
 		ready: make(chan struct{}),
+		stop:  make(chan struct{}),
+		bufferPool: sync.Pool{
+			New: func() any { return new(bytes.Buffer) },
+		},
 	}
 
 	s.contextPool.New = func() any { return s.newContext() }
@@ -140,8 +147,20 @@ func (s *server) Run(address string) error {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	close(s.ready)
-	<-stop
+
+	select {
+	case <-stop:
+	case <-s.stop:
+	}
+
+	listener.Close()
+
 	return nil
+}
+
+// Stop shuts down the server gracefully.
+func (s *server) Stop() {
+	close(s.stop)
 }
 
 // Router returns the router used by the server.
@@ -273,7 +292,9 @@ func (s *server) handleRequest(ctx *context, method string, url string, writer i
 		s.errorHandler(ctx, err)
 	}
 
-	tmp := bytes.Buffer{}
+	// 复用 buffer，减少 GC 压力
+	tmp := s.bufferPool.Get().(*bytes.Buffer)
+	tmp.Reset()
 	tmp.WriteString("HTTP/1.1 ")
 	tmp.WriteString(strconv.Itoa(int(ctx.status)))
 	tmp.WriteString("\r\nContent-Length: ")
@@ -290,6 +311,7 @@ func (s *server) handleRequest(ctx *context, method string, url string, writer i
 	tmp.WriteString("\r\n")
 	tmp.Write(ctx.response.body)
 	writer.Write(tmp.Bytes())
+	s.bufferPool.Put(tmp)
 }
 
 // newContext allocates a new context with the default state.
@@ -297,11 +319,11 @@ func (s *server) newContext() *context {
 	return &context{
 		server: s,
 		request: request{
-			headers: make([]Header, 0, 8),
+			headers: make([]Header, 0, 16), // 预分配更大容量，减少扩容
 			params:  make([]Parameter, 0, 8),
 		},
 		response: response{
-			body:    make([]byte, 0, 1024),
+			body:    make([]byte, 0, 2048), // 预分配更大容量
 			headers: make([]Header, 0, 8),
 			status:  200,
 		},
