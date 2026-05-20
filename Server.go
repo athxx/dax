@@ -28,6 +28,7 @@ type Server interface {
 	All(path string, handler Handler)
 	Delete(path string, handler Handler)
 	Get(path string, handler Handler)
+	NotFound(handler Handler)
 	Patch(path string, handler Handler)
 	Post(path string, handler Handler)
 	Put(path string, handler Handler)
@@ -45,12 +46,13 @@ type Server interface {
 type server struct {
 	handlers     []Handler
 	contextPool  sync.Pool
+	notFound     Handler
 	prefork      bool
 	router       *Router[Handler]
 	errorHandler func(Context, error)
 	ready        chan struct{}
 	stop         chan struct{}
-	bufferPool   sync.Pool // 用于复用 bytes.Buffer，减少 GC 压力
+	bufferPool   sync.Pool // Reuse bytes.Buffer to reduce GC pressure.
 }
 
 // NewServer creates a new HTTP server.
@@ -64,6 +66,8 @@ func NewServer() Server {
 
 				if handler == nil {
 					ctx.Status(404)
+					ctx.Response().SetHeader("Content-Type", "text/plain")
+					ctx.Response().SetBody([]byte("404 Not Found"))
 					return nil
 				}
 
@@ -116,6 +120,25 @@ func (s *server) Put(path string, handler Handler) {
 // Post registers your `handler` for the given `path` on POST requests.
 func (s *server) Post(path string, handler Handler) {
 	s.Router().Add("POST", path, handler)
+}
+
+// NotFoundHandler sets a custom handler for 404 responses.
+func (s *server) NotFound(h Handler) {
+	s.notFound = h
+	// Update the terminal handler in the chain to use the custom handler
+	s.handlers[len(s.handlers)-1] = func(ctx Context) error {
+		h := ctx.Handler()
+		if h == nil {
+			if s.notFound != nil {
+				return s.notFound(ctx)
+			}
+			ctx.Status(404)
+			ctx.Response().SetHeader("Content-Type", "text/plain")
+			ctx.Response().SetBody([]byte("404 Not Found"))
+			return nil
+		}
+		return h(ctx)
+	}
 }
 
 // Ready returns a channel that will be closed once the listener is ready for connection handling.
@@ -401,7 +424,7 @@ func (s *server) handleRequest(ctx *context, method string, url string, writer i
 		s.errorHandler(ctx, err)
 	}
 
-	// 复用 buffer，减少 GC 压力
+	// Reuse buffer to reduce GC pressure
 	tmp := s.bufferPool.Get().(*bytes.Buffer)
 	tmp.Reset()
 	tmp.WriteString("HTTP/1.1 ")
@@ -428,11 +451,11 @@ func (s *server) newContext() *context {
 	return &context{
 		server: s,
 		request: request{
-			headers: make([]Header, 0, 16), // 预分配更大容量，减少扩容
+			headers: make([]Header, 0, 16), // Preallocate larger capacity to reduce resizing
 			params:  make([]Parameter, 0, 8),
 		},
 		response: response{
-			body:    make([]byte, 0, 2048), // 预分配更大容量
+			body:    make([]byte, 0, 2048), // Preallocate larger capacity
 			headers: make([]Header, 0, 8),
 			status:  200,
 		},
