@@ -48,6 +48,7 @@ type server struct {
 	handlers     []Handler
 	contextPool  sync.Pool
 	notFound     Handler
+	bootMsg      bool
 	prefork      bool
 	router       *Router[Handler]
 	errorHandler func(Context, error)
@@ -183,9 +184,15 @@ func (s *server) Prefork() {
 	s.prefork = true
 }
 
-// logStartup prints server startup info.
-func (s *server) logStartup(address string, isChild bool, childIndex, totalChildren int) {
-	// fmt.Printf("\n---------%s, %t, %d, %d-----------\n", address, isChild, childIndex, totalChildren)
+func (s *server) ShowLogo() {
+	s.bootMsg = true
+}
+
+// logLogo prints server startup info.
+func (s *server) logLogo(address string, isChild bool, childIndex, totalChildren int) {
+	if !s.bootMsg {
+		return
+	}
 	if !isChild {
 		println(`
 ▄▄▄▄   ▄▄▄  ▄▄ ▄▄ 
@@ -226,7 +233,7 @@ func (s *server) runPrefork(address string) error {
 	numCPU := runtime.GOMAXPROCS(0)
 	childProcs := make([]*os.Process, 0, numCPU)
 
-	s.logStartup(address, false, 0, numCPU)
+	s.logLogo(address, false, 0, numCPU)
 
 	for i := 0; i < numCPU; i++ {
 		env := os.Environ()
@@ -283,7 +290,7 @@ func (s *server) runSingle(address string) error {
 
 	defer listener.Close()
 
-	s.logStartup(address, isChild != "", childIndex, totalChildren)
+	s.logLogo(address, isChild != "", childIndex, totalChildren)
 
 	go func() {
 		for {
