@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 )
 
 // SO_REUSEPORT allows multiple processes to bind to the same address.
@@ -21,7 +22,7 @@ import (
 const soReusePort = 0x0F
 
 // EnvPreforkChild is the environment variable set on prefork child processes.
-const EnvPreforkChild = "DAX_PREFORK_CHILD"
+const EnvPreforkChild = "DAX_PID"
 
 // Server is the interface for an HTTP server.
 type Server interface {
@@ -42,7 +43,7 @@ type Server interface {
 	Use(handlers ...Handler)
 }
 
-// server is an HTTP server.
+// HTTP server.
 type server struct {
 	handlers     []Handler
 	contextPool  sync.Pool
@@ -53,9 +54,11 @@ type server struct {
 	ready        chan struct{}
 	stop         chan struct{}
 	bufferPool   sync.Pool // Reuse bytes.Buffer to reduce GC pressure.
+	routeSeq     map[string]uint
+	useSeq       uint
 }
 
-// NewServer creates a new HTTP server.
+// create a new server.
 func NewServer() Server {
 	r := &Router[Handler]{}
 	s := &server{
@@ -82,44 +85,60 @@ func NewServer() Server {
 		bufferPool: sync.Pool{
 			New: func() any { return new(bytes.Buffer) },
 		},
+		routeSeq: make(map[string]uint),
 	}
 
 	s.contextPool.New = func() any { return s.newContext() }
 	return s
 }
 
-// All registers your `handler` for the given `path` on all HTTP methods.
+// register all HTTP methods.
 func (s *server) All(path string, handler Handler) {
 	s.Router().Add("DELETE", path, handler)
 	s.Router().Add("GET", path, handler)
 	s.Router().Add("PATCH", path, handler)
 	s.Router().Add("POST", path, handler)
 	s.Router().Add("PUT", path, handler)
+	s.recordRoute("DELETE", path)
+	s.recordRoute("GET", path)
+	s.recordRoute("PATCH", path)
+	s.recordRoute("POST", path)
+	s.recordRoute("PUT", path)
 }
 
-// Delete registers your `handler` for the given `path` on DELETE requests.
+// Delete requests.
 func (s *server) Delete(path string, handler Handler) {
 	s.Router().Add("DELETE", path, handler)
+	s.recordRoute("DELETE", path)
 }
 
-// Get registers your `handler` for the given `path` on GET requests.
+// Get requests.
 func (s *server) Get(path string, handler Handler) {
 	s.Router().Add("GET", path, handler)
+	s.recordRoute("GET", path)
 }
 
-// Patch registers your `handler` for the given `path` on PATCH requests.
+// Patch requests.
 func (s *server) Patch(path string, handler Handler) {
 	s.Router().Add("PATCH", path, handler)
+	s.recordRoute("PATCH", path)
 }
 
-// Put registers your `handler` for the given `path` on PUT requests.
+// Put requests.
 func (s *server) Put(path string, handler Handler) {
 	s.Router().Add("PUT", path, handler)
+	s.recordRoute("PUT", path)
 }
 
-// Post registers your `handler` for the given `path` on POST requests.
+// Post requests.
 func (s *server) Post(path string, handler Handler) {
 	s.Router().Add("POST", path, handler)
+	s.recordRoute("POST", path)
+}
+
+// recordRoute records the sequence number of a route registration.
+func (s *server) recordRoute(method, path string) {
+	s.routeSeq[method+":"+path] = s.useSeq
 }
 
 // NotFoundHandler sets a custom handler for 404 responses.
@@ -166,30 +185,30 @@ func (s *server) Prefork() {
 
 // logStartup prints server startup info.
 func (s *server) logStartup(address string, isChild bool, childIndex, totalChildren int) {
+	// fmt.Printf("\n---------%s, %t, %d, %d-----------\n", address, isChild, childIndex, totalChildren)
 	if !isChild {
 		println(`
-       ░██                       
-       ░██                       
- ░████████  ░██████   ░██    ░██ 
-░██    ░██       ░██   ░██  ░██  
-░██    ░██  ░███████    ░█████   
-░██   ░███ ░██   ░██   ░██  ░██  
- ░█████░██  ░█████░██ ░██    ░██    v1.0
---------------------------------------------------
-`)
-		fmt.Println("  Listening on    ", address)
-		if s.prefork {
-			fmt.Println("  Prefork          Enabled")
-		} else {
-			fmt.Println("  Prefork          Disabled")
+▄▄▄▄   ▄▄▄  ▄▄ ▄▄ 
+██▀██ ██▀██ ▀█▄█▀ 
+████▀ ██▀██ ██ ██ v1.0
+-------------------------------------------------------------------------
+  Listening on  `, address)
+		println("  PID:          ", os.Getpid())
+		println("  Processes     ", totalChildren+1)
+	}
+	if totalChildren > 0 {
+		if childIndex == 0 {
+			print(`  Child PIDs:    `)
+		} else if childIndex > 0 && childIndex < totalChildren {
+			print(strconv.FormatInt(int64(os.Getpid()), 10) + `,`)
 		}
-		fmt.Println("  Processes       ", totalChildren)
-		fmt.Print("  PID:             ", os.Getpid())
-	} else {
-		fmt.Print(",", os.Getpid())
-		if childIndex >= totalChildren {
-			println("\n\n")
+	}
+	if childIndex == totalChildren {
+		time.Sleep(5 * time.Millisecond)
+		if isChild {
+			print(os.Getpid(), "\n")
 		}
+		println("-------------------------------------------------------------------------\n")
 	}
 }
 
@@ -211,7 +230,7 @@ func (s *server) runPrefork(address string) error {
 
 	for i := 0; i < numCPU; i++ {
 		env := os.Environ()
-		env = append(env, fmt.Sprintf("%s=%d", EnvPreforkChild, i+1))
+		env = append(env, EnvPreforkChild+`=`+strconv.FormatInt(int64(i+1), 10))
 
 		proc, err := os.StartProcess(os.Args[0], os.Args, &os.ProcAttr{
 			Env:   env,
@@ -301,9 +320,25 @@ func (s *server) Router() *Router[Handler] {
 }
 
 // Use adds handlers to your handlers chain.
+// Middleware only applies to routes registered after the Use() call.
 func (s *server) Use(handlers ...Handler) {
+	s.useSeq++
+
+	boundary := s.useSeq
+	wrapped := make([]Handler, len(handlers))
+	for i, h := range handlers {
+		h := h // capture
+		wrapped[i] = func(ctx Context) error {
+			// Skip this middleware if the route was registered before Use().
+			if seq, ok := s.routeSeq[ctx.Request().Method()+":"+ctx.Request().Path()]; ok && seq < boundary {
+				return ctx.Next(ctx)
+			}
+			return h(ctx)
+		}
+	}
+
 	last := s.handlers[len(s.handlers)-1]
-	s.handlers = append(s.handlers[:len(s.handlers)-1], handlers...)
+	s.handlers = append(s.handlers[:len(s.handlers)-1], wrapped...)
 	s.handlers = append(s.handlers, last)
 }
 
@@ -405,6 +440,7 @@ func (s *server) handleConnection(conn net.Conn) {
 		ctx.request.consumed = 0
 		ctx.request.length = 0
 		ctx.request.headers = ctx.request.headers[:0]
+		ctx.request.ip = conn.RemoteAddr().String()
 		ctx.response.headers = ctx.response.headers[:0]
 		ctx.response.body = ctx.response.body[:0]
 		ctx.params = ctx.params[:0]
@@ -414,36 +450,46 @@ func (s *server) handleConnection(conn net.Conn) {
 }
 
 // handleRequest handles the given request.
-func (s *server) handleRequest(ctx *context, method string, url string, writer io.Writer) {
+func (s *server) handleRequest(ctx *context, method string, url string, w io.Writer) {
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
 
-	err := s.handlers[0](ctx)
+	// If the route doesn't exist, skip middleware and go directly to the
+	// terminal handler (404). This prevents auth/rate-limit middlewares
+	// from intercepting non-existent routes.
+	var h Handler
+	handler := s.handlers[len(s.handlers)-1]
+	if h = s.router.LookupNoAlloc(method, ctx.path, func(string, string) {}); h != nil {
+		handler = s.handlers[0]
+	}
+	_ = h
+
+	err := handler(ctx)
 
 	if err != nil {
 		s.errorHandler(ctx, err)
 	}
 
 	// Reuse buffer to reduce GC pressure
-	tmp := s.bufferPool.Get().(*bytes.Buffer)
-	tmp.Reset()
-	tmp.WriteString("HTTP/1.1 ")
-	tmp.WriteString(strconv.Itoa(int(ctx.status)))
-	tmp.WriteString("\r\nContent-Length: ")
-	tmp.WriteString(strconv.Itoa(len(ctx.response.body)))
-	tmp.WriteString("\r\n")
+	buf := s.bufferPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	buf.WriteString(`HTTP/1.1 `)
+	buf.WriteString(strconv.Itoa(int(ctx.status)))
+	buf.WriteString("\r\nContent-Length: ")
+	buf.WriteString(strconv.Itoa(len(ctx.response.body)))
+	buf.WriteString("\r\n")
 
 	for _, header := range ctx.response.headers {
-		tmp.WriteString(header.Key)
-		tmp.WriteString(": ")
-		tmp.WriteString(header.Value)
-		tmp.WriteString("\r\n")
+		buf.WriteString(header.Key)
+		buf.WriteString(`: `)
+		buf.WriteString(header.Value)
+		buf.WriteString("\r\n")
 	}
 
-	tmp.WriteString("\r\n")
-	tmp.Write(ctx.response.body)
-	writer.Write(tmp.Bytes())
-	s.bufferPool.Put(tmp)
+	buf.WriteString("\r\n")
+	buf.Write(ctx.response.body)
+	w.Write(buf.Bytes())
+	s.bufferPool.Put(buf)
 }
 
 // newContext allocates a new context with the default state.

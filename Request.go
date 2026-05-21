@@ -26,6 +26,7 @@ type request struct {
 	host     string
 	method   string
 	path     string
+	ip       string
 	query    Query
 	headers  []Header
 	params   []Parameter
@@ -52,6 +53,11 @@ func (req *request) Host() string {
 // Method returns the request method.
 func (req *request) Method() string {
 	return req.method
+}
+
+// RemoteIP returns the client's remote address.
+func (req *request) RemoteIP() string {
+	return req.ip
 }
 
 // Param retrieves a parameter.

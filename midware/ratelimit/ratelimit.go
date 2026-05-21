@@ -10,7 +10,6 @@
 package ratelimit
 
 import (
-	"fmt"
 	"sync"
 	"time"
 
@@ -53,7 +52,16 @@ var defaultConfig = Config{
 func New(config ...Config) dax.Handler {
 	cfg := defaultConfig
 	if len(config) > 0 {
-		cfg = config[0]
+		c := config[0]
+		if c.Rate != 0 {
+			cfg.Rate = c.Rate
+		}
+		if c.Burst != 0 {
+			cfg.Burst = c.Burst
+		}
+		if c.Key != nil {
+			cfg.Key = c.Key
+		}
 	}
 
 	rl := &rateLimiter{
@@ -66,7 +74,7 @@ func New(config ...Config) dax.Handler {
 	return func(ctx dax.Context) error {
 		key := rl.keyFunc(ctx)
 		if key == "" {
-			key = fmt.Sprintf("%p", ctx)
+			key = ctx.Request().Path()
 		}
 
 		if !rl.allow(key) {
