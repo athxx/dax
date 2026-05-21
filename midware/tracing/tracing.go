@@ -1,5 +1,4 @@
-// Package tracing provides distributed tracing middleware that injects
-// trace IDs into the request context and response headers.
+// Package tracing provides distributed tracing middleware (trace/span IDs).
 //
 // Usage:
 //
@@ -29,7 +28,7 @@ var defaultConfig = Config{
 	Header:      "X-Trace-ID",
 }
 
-// New creates a new tracing middleware.
+// New creates tracing middleware.
 func New(config ...Config) dax.Handler {
 	cfg := defaultConfig
 	if len(config) > 0 {

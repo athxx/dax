@@ -1,4 +1,4 @@
-// Package ratelimit provides rate limiting middleware based on the token bucket algorithm.
+// Package ratelimit provides token-bucket rate limiting middleware.
 //
 // Usage:
 //
@@ -48,7 +48,7 @@ var defaultConfig = Config{
 	Key:   ByIP,
 }
 
-// New creates a new rate limiter middleware.
+// New creates rate limiter middleware.
 func New(config ...Config) dax.Handler {
 	cfg := defaultConfig
 	if len(config) > 0 {

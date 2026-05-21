@@ -4,7 +4,7 @@ import (
 	"errors"
 )
 
-// Context is the interface for a request and its response.
+// Context is the request/response interface.
 type Context interface {
 	Bytes([]byte) error
 	Error(...any) error

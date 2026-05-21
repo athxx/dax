@@ -1,6 +1,6 @@
 package dax
 
-// Router is a high-performance r.
+// Router is a high-performance radix-tree router.
 type Router[T any] struct {
 	get    Tree[T]
 	post   Tree[T]
@@ -9,18 +9,18 @@ type Router[T any] struct {
 	patch  Tree[T]
 }
 
-// NewRouter creates a new router containing trees for every HTTP method.
+// NewRouter creates a router with trees per HTTP method.
 func NewRouter[T any]() *Router[T] {
 	return &Router[T]{}
 }
 
-// Add registers a new handler for the given method and path.
+// Add registers a handler for the given method and path.
 func (r *Router[T]) Add(method string, path string, handler T) {
 	tree := r.selectTree(method)
 	tree.Add(path, handler)
 }
 
-// Lookup finds the handler and parameters for the given route.
+// Lookup finds the handler and parameters for a route.
 func (r *Router[T]) Lookup(method string, path string) (T, []Parameter) {
 	if method[0] == 'G' {
 		return r.get.Lookup(path)
@@ -30,7 +30,7 @@ func (r *Router[T]) Lookup(method string, path string) (T, []Parameter) {
 	return tree.Lookup(path)
 }
 
-// LookupNoAlloc finds the handler and parameters for the given route without using any memory allocations.
+// LookupNoAlloc finds the handler without allocating.
 func (r *Router[T]) LookupNoAlloc(method string, path string, addParameter func(string, string)) T {
 	if method[0] == 'G' {
 		return r.get.LookupNoAlloc(path, addParameter)
@@ -40,7 +40,7 @@ func (r *Router[T]) LookupNoAlloc(method string, path string, addParameter func(
 	return tree.LookupNoAlloc(path, addParameter)
 }
 
-// Map traverses all trees and calls the given function on every node.
+// Map calls transform on every handler in the router.
 func (r *Router[T]) Map(transform func(T) T) {
 	r.get.Map(transform)
 	r.post.Map(transform)
@@ -49,7 +49,7 @@ func (r *Router[T]) Map(transform func(T) T) {
 	r.patch.Map(transform)
 }
 
-// selectTree returns the tree by the given HTTP method.
+// selectTree returns the tree for the given HTTP method.
 func (r *Router[T]) selectTree(method string) *Tree[T] {
 	switch method {
 	case "GET":

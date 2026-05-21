@@ -23,5 +23,7 @@ func main() {
 		return ctx.String(custom.User)
 	})
 
-	s.Run(":8080")
+	if err := s.Run(":8080"); err != nil {
+		panic(err)
+	}
 }

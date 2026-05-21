@@ -1,5 +1,5 @@
-// Package security provides middleware for basic security hardening,
-// including SQL injection and XSS protection.
+// Package security provides basic security hardening middleware
+// (SQL injection / XSS protection, security headers).
 //
 // Usage:
 //
@@ -47,7 +47,7 @@ var xssPatterns = []string{
 	"&lt;script", "&#60;script",
 }
 
-// New creates a new security middleware.
+// New creates security middleware.
 func New(config ...Config) dax.Handler {
 	cfg := defaultConfig
 	if len(config) > 0 {

@@ -23,7 +23,7 @@ var defaultConfig = Config{
 	PrintStack: false,
 }
 
-// New creates a new recovery middleware.
+// New creates panic recovery middleware.
 func New(config ...Config) dax.Handler {
 	cfg := defaultConfig
 	if len(config) > 0 {

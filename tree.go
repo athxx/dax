@@ -1,6 +1,6 @@
 package dax
 
-// Tree represents a radix tree.
+// Tree is a radix tree for route matching.
 type Tree[T any] struct {
 	root treeNode[T]
 }
@@ -15,13 +15,13 @@ const (
 	flowNext
 )
 
-// Parameter represents a URL parameter.
+// Parameter is a URL path parameter (key=value).
 type Parameter struct {
 	Key   string
 	Value string
 }
 
-// Add adds a new element to the tree.
+// Add inserts data into the tree for the given path.
 func (tree *Tree[T]) Add(path string, data T) {
 	// Search tree for equal parts until we can no longer proceed
 	i := 0
@@ -94,7 +94,7 @@ func (tree *Tree[T]) Add(path string, data T) {
 	}
 }
 
-// Lookup finds the data for the given path.
+// Lookup finds data for the given path.
 func (tree *Tree[T]) Lookup(path string) (T, []Parameter) {
 	var params []Parameter
 
@@ -105,7 +105,7 @@ func (tree *Tree[T]) Lookup(path string) (T, []Parameter) {
 	return data, params
 }
 
-// LookupNoAlloc finds the data for the given path without using any memory allocations.
+// LookupNoAlloc finds data without allocating.
 func (tree *Tree[T]) LookupNoAlloc(path string, addParameter func(key string, value string)) T {
 	var (
 		i             uint
@@ -212,7 +212,7 @@ notFound:
 	return empty
 }
 
-// Map binds all handlers to a new one provided by the callback.
+// Map calls transform on every node's data.
 func (tree *Tree[T]) Map(transform func(T) T) {
 	tree.root.each(func(node *treeNode[T]) {
 		node.data = transform(node.data)

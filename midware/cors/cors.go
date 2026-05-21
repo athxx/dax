@@ -1,4 +1,4 @@
-// Package cors provides Cross-Origin Resource Sharing middleware.
+// Package cors provides CORS middleware.
 //
 // Usage:
 //
@@ -35,7 +35,7 @@ var defaultConfig = Config{
 	MaxAge:         "86400",
 }
 
-// New creates a new CORS middleware.
+// New creates CORS middleware.
 func New(config ...Config) dax.Handler {
 	cfg := defaultConfig
 	if len(config) > 0 {

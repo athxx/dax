@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// Request is an interface for HTTP requests.
+// Request is an HTTP request interface.
 type Request interface {
 	io.Reader
 	Header(string) string

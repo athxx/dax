@@ -1,4 +1,4 @@
-// Package auth provides authentication middleware including JWT validation and API Key authentication.
+// Package auth provides JWT and API-key authentication middleware.
 //
 // Usage:
 //
@@ -37,7 +37,7 @@ var defaultJWTConfig = JWTConfig{
 	TokenPrefix:     "Bearer ",
 }
 
-// NewJWT creates a new JWT authentication middleware.
+// NewJWT creates JWT middleware. Tokens use HMAC-SHA256.
 func NewJWT(config JWTConfig) dax.Handler {
 	if config.Secret == "" {
 		panic("auth: JWT secret is required")
@@ -136,7 +136,7 @@ var defaultAPIKeyConfig = APIKeyConfig{
 	Header: "X-API-Key",
 }
 
-// NewAPIKey creates a new API key authentication middleware.
+// NewAPIKey creates API key middleware.
 func NewAPIKey(config APIKeyConfig) dax.Handler {
 	if len(config.Keys) == 0 {
 		panic("auth: at least one API key is required")

@@ -1,4 +1,4 @@
-// Package gzip provides response compression middleware using gzip.
+// Package gzip provides response compression middleware.
 //
 // Usage:
 //
@@ -26,7 +26,7 @@ var defaultConfig = Config{
 	MinLength: 1024,
 }
 
-// New creates a new gzip compression middleware.
+// New creates gzip compression middleware.
 func New(config ...Config) dax.Handler {
 	cfg := defaultConfig
 	if len(config) > 0 {

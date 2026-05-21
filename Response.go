@@ -4,7 +4,7 @@ import (
 	"io"
 )
 
-// Response is the interface for an HTTP response.
+// Response is an HTTP response interface.
 type Response interface {
 	io.Writer
 	io.StringWriter

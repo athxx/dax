@@ -2,7 +2,7 @@ package dax
 
 import "strings"
 
-// Query is a part of a URL that assigns values to specified parameters.
+// Query is an HTTP query string.
 type Query string
 
 // Param retrieves a query parameter.
@@ -31,16 +31,16 @@ func (q Query) Param(name string) string {
 	return ""
 }
 
-// Header is used to store HTTP headers.
+// Header is an HTTP header key/value pair.
 type Header struct {
 	Key   string
 	Value string
 }
 
-// Handler is a function that deals with the given request/response context.
+// Handler processes a request/response context.
 type Handler func(Context) error
 
-// isRequestMethod returns true if the given string is a valid HTTP request method.
+// isRequestMethod returns true for valid HTTP methods.
 func isRequestMethod(method string) bool {
 	switch method {
 	case "GET", "HEAD", "POST", "PUT", "DELETE", "CONNECT", "OPTIONS", "TRACE", "PATCH":
@@ -50,7 +50,7 @@ func isRequestMethod(method string) bool {
 	}
 }
 
-// parseURL parses a URL and returns the scheme, host, path and query.
+// parseURL splits a URL into scheme, host, path, and query.
 func parseURL(url string) (scheme string, host string, path string, query Query) {
 	schemePos := strings.Index(url, "://")
 

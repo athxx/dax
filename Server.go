@@ -24,7 +24,7 @@ const soReusePort = 0x0F
 // EnvPreforkChild is the environment variable set on prefork child processes.
 const EnvPreforkChild = "DAX_PID"
 
-// Server is the interface for an HTTP server.
+// Server is an HTTP server interface.
 type Server interface {
 	All(path string, handler Handler)
 	Delete(path string, handler Handler)
@@ -39,11 +39,12 @@ type Server interface {
 	Router() *Router[Handler]
 	Run(address string) error
 	SetErrorHandler(handler func(Context, error))
+	ShowLogo()
 	Stop()
 	Use(handlers ...Handler)
 }
 
-// HTTP server.
+// server implements the Server interface.
 type server struct {
 	handlers     []Handler
 	contextPool  sync.Pool
@@ -59,7 +60,7 @@ type server struct {
 	useSeq       uint
 }
 
-// create a new server.
+// NewServer creates a new Server.
 func NewServer() Server {
 	r := &Router[Handler]{}
 	s := &server{
@@ -67,14 +68,12 @@ func NewServer() Server {
 		handlers: []Handler{
 			func(ctx Context) error {
 				handler := ctx.Handler()
-
 				if handler == nil {
 					ctx.Status(404)
 					ctx.Response().SetHeader("Content-Type", "text/plain")
 					ctx.Response().SetBody([]byte("404 Not Found"))
 					return nil
 				}
-
 				return handler(ctx)
 			},
 		},
@@ -88,12 +87,11 @@ func NewServer() Server {
 		},
 		routeSeq: make(map[string]uint),
 	}
-
 	s.contextPool.New = func() any { return s.newContext() }
 	return s
 }
 
-// register all HTTP methods.
+// All registers handler for all HTTP methods on the given path.
 func (s *server) All(path string, handler Handler) {
 	s.Router().Add("DELETE", path, handler)
 	s.Router().Add("GET", path, handler)
@@ -107,31 +105,31 @@ func (s *server) All(path string, handler Handler) {
 	s.recordRoute("PUT", path)
 }
 
-// Delete requests.
+// Delete registers handler for DELETE requests on the given path.
 func (s *server) Delete(path string, handler Handler) {
 	s.Router().Add("DELETE", path, handler)
 	s.recordRoute("DELETE", path)
 }
 
-// Get requests.
+// Get registers handler for GET requests on the given path.
 func (s *server) Get(path string, handler Handler) {
 	s.Router().Add("GET", path, handler)
 	s.recordRoute("GET", path)
 }
 
-// Patch requests.
+// Patch registers handler for PATCH requests on the given path.
 func (s *server) Patch(path string, handler Handler) {
 	s.Router().Add("PATCH", path, handler)
 	s.recordRoute("PATCH", path)
 }
 
-// Put requests.
+// Put registers handler for PUT requests on the given path.
 func (s *server) Put(path string, handler Handler) {
 	s.Router().Add("PUT", path, handler)
 	s.recordRoute("PUT", path)
 }
 
-// Post requests.
+// Post registers handler for POST requests on the given path.
 func (s *server) Post(path string, handler Handler) {
 	s.Router().Add("POST", path, handler)
 	s.recordRoute("POST", path)
@@ -142,7 +140,7 @@ func (s *server) recordRoute(method, path string) {
 	s.routeSeq[method+":"+path] = s.useSeq
 }
 
-// NotFoundHandler sets a custom handler for 404 responses.
+// NotFound registers a custom 404 handler.
 func (s *server) NotFound(h Handler) {
 	s.notFound = h
 	// Update the terminal handler in the chain to use the custom handler
@@ -161,14 +159,13 @@ func (s *server) NotFound(h Handler) {
 	}
 }
 
-// Ready returns a channel that will be closed once the listener is ready for connection handling.
+// Ready returns a channel closed when the listener is ready.
 func (s *server) Ready() chan struct{} {
 	return s.ready
 }
 
 // Request performs a synthetic request and returns the response.
-// This function keeps the response in memory so it's slightly slower than a real request.
-// However it is very useful inside tests where you don't want to spin up a real web server.
+// Useful in tests — avoids spinning up a real server.
 func (s *server) Request(method string, url string, headers []Header, body io.Reader) Response {
 	ctx := s.newContext()
 	ctx.request.headers = headers
@@ -177,13 +174,13 @@ func (s *server) Request(method string, url string, headers []Header, body io.Re
 	return ctx.Response()
 }
 
-// Prefork enables multi-process prefork mode using SO_REUSEPORT.
-// When enabled, the server forks one child process per GOMAXPROCS
-// and the kernel load-balances connections across them.
+// Prefork enables multi-process mode.
+// Forks one child per GOMAXPROCS; the kernel load-balances connections.
 func (s *server) Prefork() {
 	s.prefork = true
 }
 
+// ShowLogo enables the server to print a startup logo with process info.
 func (s *server) ShowLogo() {
 	s.bootMsg = true
 }
@@ -220,11 +217,11 @@ func (s *server) logLogo(address string, isChild bool, childIndex, totalChildren
 }
 
 // Run starts the server on the given address.
+// Starts in prefork mode if Prefork() was called.
 func (s *server) Run(address string) error {
 	if s.prefork && os.Getenv(EnvPreforkChild) == "" {
 		return s.runPrefork(address)
 	}
-
 	return s.runSingle(address)
 }
 
@@ -232,13 +229,10 @@ func (s *server) Run(address string) error {
 func (s *server) runPrefork(address string) error {
 	numCPU := runtime.GOMAXPROCS(0)
 	childProcs := make([]*os.Process, 0, numCPU)
-
 	s.logLogo(address, false, 0, numCPU)
-
 	for i := 0; i < numCPU; i++ {
 		env := os.Environ()
 		env = append(env, EnvPreforkChild+`=`+strconv.FormatInt(int64(i+1), 10))
-
 		proc, err := os.StartProcess(os.Args[0], os.Args, &os.ProcAttr{
 			Env:   env,
 			Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
@@ -248,28 +242,23 @@ func (s *server) runPrefork(address string) error {
 		}
 		childProcs = append(childProcs, proc)
 	}
-
 	// Wait for all children to exit
 	for _, proc := range childProcs {
 		proc.Wait()
 	}
-
 	return nil
 }
 
-// runSingle runs the server in a single process (normal or prefork child).
+// runSingle runs the server in a single process.
 func (s *server) runSingle(address string) error {
 	var listener net.Listener
 	var err error
-
 	isChild := os.Getenv(EnvPreforkChild)
 	childIndex := 0
 	totalChildren := 0
-
 	if s.prefork && isChild != "" {
 		childIndex, _ = strconv.Atoi(isChild)
 		totalChildren = runtime.GOMAXPROCS(0)
-
 		config := &net.ListenConfig{
 			Control: func(network, address string, c syscall.RawConn) error {
 				return c.Control(func(fd uintptr) {
@@ -278,59 +267,47 @@ func (s *server) runSingle(address string) error {
 				})
 			},
 		}
-
 		listener, err = config.Listen(goctx.Background(), "tcp", address)
 	} else {
 		listener, err = net.Listen("tcp", address)
 	}
-
 	if err != nil {
 		return err
 	}
-
 	defer listener.Close()
-
 	s.logLogo(address, isChild != "", childIndex, totalChildren)
-
 	go func() {
 		for {
 			conn, err := listener.Accept()
-
 			if err != nil {
 				continue
 			}
-
 			go s.handleConnection(conn)
 		}
 	}()
-
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, os.Interrupt, syscall.SIGTERM)
 	close(s.ready)
-
 	select {
 	case <-stop:
 	case <-s.stop:
 	}
-
 	return nil
 }
 
-// Stop shuts down the server gracefully.
+// Stop gracefully shuts down the server.
 func (s *server) Stop() {
 	close(s.stop)
 }
 
-// Router returns the router used by the server.
+// Router returns the server's router.
 func (s *server) Router() *Router[Handler] {
 	return s.router
 }
 
-// Use adds handlers to your handlers chain.
-// Middleware only applies to routes registered after the Use() call.
+// Use registers middleware. Only applies to routes registered after this call.
 func (s *server) Use(handlers ...Handler) {
 	s.useSeq++
-
 	boundary := s.useSeq
 	wrapped := make([]Handler, len(handlers))
 	for i, h := range handlers {
@@ -343,18 +320,17 @@ func (s *server) Use(handlers ...Handler) {
 			return h(ctx)
 		}
 	}
-
 	last := s.handlers[len(s.handlers)-1]
 	s.handlers = append(s.handlers[:len(s.handlers)-1], wrapped...)
 	s.handlers = append(s.handlers, last)
 }
 
-// SetErrorHandler sets the error handler for the server.
+// SetErrorHandler sets a custom error handler.
 func (s *server) SetErrorHandler(handler func(Context, error)) {
 	s.errorHandler = handler
 }
 
-// handleConnection handles an accepted connection.
+// handleConnection reads HTTP requests from a connection and dispatches them.
 func (s *server) handleConnection(conn net.Conn) {
 	var (
 		ctx    = s.contextPool.Get().(*context)
@@ -362,87 +338,63 @@ func (s *server) handleConnection(conn net.Conn) {
 		url    string
 		close  bool
 	)
-
 	ctx.reader.Reset(conn)
-
 	defer conn.Close()
 	defer s.contextPool.Put(ctx)
-
 	for !close {
 		// Read the HTTP request line
 		message, err := ctx.reader.ReadString('\n')
-
 		if err != nil {
 			return
 		}
-
 		space := strings.IndexByte(message, ' ')
-
 		if space <= 0 {
 			io.WriteString(conn, "HTTP/1.1 400 Bad Request\r\n\r\n")
 			return
 		}
-
 		method = message[:space]
-
 		if !isRequestMethod(method) {
 			io.WriteString(conn, "HTTP/1.1 400 Bad Request\r\n\r\n")
 			return
 		}
-
 		lastSpace := strings.LastIndexByte(message, ' ')
-
 		if lastSpace == space {
 			lastSpace = len(message) - len("\r\n")
 		}
-
 		space += 1
-
 		if space > lastSpace {
 			io.WriteString(conn, "HTTP/1.1 400 Bad Request\r\n\r\n")
 			return
 		}
-
 		url = message[space:lastSpace]
-
 		// Add headers until we meet an empty line
 		for {
 			message, err = ctx.reader.ReadString('\n')
-
 			if err != nil {
 				return
 			}
-
 			if message == "\r\n" {
 				break
 			}
-
 			colon := strings.IndexByte(message, ':')
-
 			if colon <= 0 {
 				continue
 			}
-
 			if colon > len(message)-4 {
 				continue
 			}
-
 			key := message[:colon]
 			value := message[colon+2 : len(message)-2]
-
 			ctx.request.headers = append(ctx.request.headers, Header{
 				Key:   key,
 				Value: value,
 			})
-
 			if value == "close" && strings.EqualFold(key, "connection") {
 				close = true
 			}
 		}
-
 		// Handle the request
 		s.handleRequest(ctx, method, url, conn)
-
 		// Clean up the context
 		ctx.request.consumed = 0
 		ctx.request.length = 0
@@ -456,11 +408,11 @@ func (s *server) handleConnection(conn net.Conn) {
 	}
 }
 
-// handleRequest handles the given request.
+// handleRequest dispatches the request to middleware or the terminal handler.
+// Non-existent routes skip middleware and go directly to the terminal (404) handler.
 func (s *server) handleRequest(ctx *context, method string, url string, w io.Writer) {
 	ctx.method = method
 	ctx.scheme, ctx.host, ctx.path, ctx.query = parseURL(url)
-
 	// If the route doesn't exist, skip middleware and go directly to the
 	// terminal handler (404). This prevents auth/rate-limit middlewares
 	// from intercepting non-existent routes.
@@ -470,13 +422,10 @@ func (s *server) handleRequest(ctx *context, method string, url string, w io.Wri
 		handler = s.handlers[0]
 	}
 	_ = h
-
 	err := handler(ctx)
-
 	if err != nil {
 		s.errorHandler(ctx, err)
 	}
-
 	// Reuse buffer to reduce GC pressure
 	buf := s.bufferPool.Get().(*bytes.Buffer)
 	buf.Reset()
@@ -485,14 +434,12 @@ func (s *server) handleRequest(ctx *context, method string, url string, w io.Wri
 	buf.WriteString("\r\nContent-Length: ")
 	buf.WriteString(strconv.Itoa(len(ctx.response.body)))
 	buf.WriteString("\r\n")
-
 	for _, header := range ctx.response.headers {
 		buf.WriteString(header.Key)
 		buf.WriteString(`: `)
 		buf.WriteString(header.Value)
 		buf.WriteString("\r\n")
 	}
-
 	buf.WriteString("\r\n")
 	buf.Write(ctx.response.body)
 	w.Write(buf.Bytes())

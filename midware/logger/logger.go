@@ -1,4 +1,4 @@
-// Package logger provides request logging middleware.
+// Package logger provides request logging middleware with configurable format.
 //
 // Usage:
 //
@@ -26,7 +26,7 @@ var defaultConfig = Config{
 	Format: "[${method}] ${path} ${status} ${duration}",
 }
 
-// New creates a new logger middleware.
+// New creates request logging middleware.
 func New(config ...Config) dax.Handler {
 	cfg := defaultConfig
 	if len(config) > 0 {
