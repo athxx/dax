@@ -38,6 +38,7 @@ type Server interface {
 	Request(method string, path string, headers []Header, body io.Reader) Response
 	Router() *Router[Handler]
 	Run(address string) error
+	RunUnix(socketPath string) error
 	SetErrorHandler(handler func(Context, error))
 	ShowLogo()
 	Stop()
@@ -46,18 +47,18 @@ type Server interface {
 
 // server implements the Server interface.
 type server struct {
-	handlers     []Handler
-	contextPool  sync.Pool
-	notFound     Handler
-	bootMsg      bool
-	prefork      bool
-	router       *Router[Handler]
-	errorHandler func(Context, error)
-	ready        chan struct{}
-	stop         chan struct{}
-	bufferPool   sync.Pool // Reuse bytes.Buffer to reduce GC pressure.
-	routeSeq     map[string]uint
-	useSeq       uint
+	handlers   []Handler
+	ctxPool    sync.Pool
+	notFound   Handler
+	bootMsg    bool
+	prefork    bool
+	router     *Router[Handler]
+	errHandler func(Context, error)
+	ready      chan struct{}
+	stop       chan struct{}
+	bufPool    sync.Pool // Reuse bytes.Buffer to reduce GC pressure.
+	routeSeq   map[string]uint
+	useSeq     uint
 }
 
 // NewServer creates a new Server.
@@ -77,17 +78,17 @@ func NewServer() Server {
 				return handler(ctx)
 			},
 		},
-		errorHandler: func(ctx Context, err error) {
+		errHandler: func(ctx Context, err error) {
 			log.Println(ctx.Request().Path(), err)
 		},
 		ready: make(chan struct{}),
 		stop:  make(chan struct{}),
-		bufferPool: sync.Pool{
+		bufPool: sync.Pool{
 			New: func() any { return new(bytes.Buffer) },
 		},
 		routeSeq: make(map[string]uint),
 	}
-	s.contextPool.New = func() any { return s.newContext() }
+	s.ctxPool.New = func() any { return s.newContext() }
 	return s
 }
 
@@ -216,33 +217,57 @@ func (s *server) logLogo(address string, isChild bool, childIndex, totalChildren
 	}
 }
 
-// Run starts the server on the given address.
-// Starts in prefork mode if Prefork() was called.
+// Run starts the server on the given TCP address.
 func (s *server) Run(address string) error {
-	if s.prefork && os.Getenv(EnvPreforkChild) == "" {
-		return s.runPrefork(address)
-	}
-	return s.runSingle(address)
+	return s.run("tcp", address)
 }
 
-// runPrefork forks child processes with SO_REUSEPORT.
-func (s *server) runPrefork(address string) error {
+// RunUnix starts the server on a Unix domain socket at the given path.
+func (s *server) RunUnix(socketPath string) error {
+	return s.run("unix", socketPath)
+}
+
+// run starts the server, dispatching to prefork or single-process mode.
+func (s *server) run(network, address string) error {
+	if s.prefork && os.Getenv(EnvPreforkChild) == "" {
+		return s.runPrefork(network, address)
+	}
+	return s.runSingle(network, address)
+}
+
+// runPrefork forks child processes. TCP uses SO_REUSEPORT (each child binds);
+// Unix sockets share the parent's listener fd via fd inheritance.
+func (s *server) runPrefork(network, address string) error {
 	numCPU := runtime.GOMAXPROCS(0)
+	files := []*os.File{os.Stdin, os.Stdout, os.Stderr}
+	// Unix sockets can't use SO_REUSEPORT — share one listener fd with children.
+	if network == "unix" {
+		os.Remove(address)
+		l, err := net.Listen("unix", address)
+		if err != nil {
+			return err
+		}
+		defer l.Close()
+		f, err := l.(*net.UnixListener).File()
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		files = append(files, f)
+	}
 	childProcs := make([]*os.Process, 0, numCPU)
 	s.logLogo(address, false, 0, numCPU)
 	for i := 0; i < numCPU; i++ {
-		env := os.Environ()
-		env = append(env, EnvPreforkChild+`=`+strconv.FormatInt(int64(i+1), 10))
+		env := append(os.Environ(), EnvPreforkChild+`=`+strconv.FormatInt(int64(i+1), 10))
 		proc, err := os.StartProcess(os.Args[0], os.Args, &os.ProcAttr{
 			Env:   env,
-			Files: []*os.File{os.Stdin, os.Stdout, os.Stderr},
+			Files: files,
 		})
 		if err != nil {
 			return fmt.Errorf("dax: prefork failed to start child %d: %w", i+1, err)
 		}
 		childProcs = append(childProcs, proc)
 	}
-	// Wait for all children to exit
 	for _, proc := range childProcs {
 		proc.Wait()
 	}
@@ -250,7 +275,7 @@ func (s *server) runPrefork(address string) error {
 }
 
 // runSingle runs the server in a single process.
-func (s *server) runSingle(address string) error {
+func (s *server) runSingle(network, address string) error {
 	var listener net.Listener
 	var err error
 	isChild := os.Getenv(EnvPreforkChild)
@@ -259,17 +284,27 @@ func (s *server) runSingle(address string) error {
 	if s.prefork && isChild != "" {
 		childIndex, _ = strconv.Atoi(isChild)
 		totalChildren = runtime.GOMAXPROCS(0)
-		config := &net.ListenConfig{
-			Control: func(network, address string, c syscall.RawConn) error {
-				return c.Control(func(fd uintptr) {
-					syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
-					syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, soReusePort, 1)
-				})
-			},
+		if network == "unix" {
+			// Unix prefork child: inherit listener fd from parent (fd 3).
+			f := os.NewFile(3, "listener")
+			listener, err = net.FileListener(f)
+			f.Close()
+		} else {
+			config := &net.ListenConfig{
+				Control: func(network, address string, c syscall.RawConn) error {
+					return c.Control(func(fd uintptr) {
+						syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, syscall.SO_REUSEADDR, 1)
+						syscall.SetsockoptInt(int(fd), syscall.SOL_SOCKET, soReusePort, 1)
+					})
+				},
+			}
+			listener, err = config.Listen(goctx.Background(), network, address)
 		}
-		listener, err = config.Listen(goctx.Background(), "tcp", address)
 	} else {
-		listener, err = net.Listen("tcp", address)
+		if network == "unix" {
+			os.Remove(address)
+		}
+		listener, err = net.Listen(network, address)
 	}
 	if err != nil {
 		return err
@@ -327,20 +362,20 @@ func (s *server) Use(handlers ...Handler) {
 
 // SetErrorHandler sets a custom error handler.
 func (s *server) SetErrorHandler(handler func(Context, error)) {
-	s.errorHandler = handler
+	s.errHandler = handler
 }
 
 // handleConnection reads HTTP requests from a connection and dispatches them.
 func (s *server) handleConnection(conn net.Conn) {
 	var (
-		ctx    = s.contextPool.Get().(*context)
+		ctx    = s.ctxPool.Get().(*context)
 		method string
 		url    string
 		close  bool
 	)
 	ctx.reader.Reset(conn)
 	defer conn.Close()
-	defer s.contextPool.Put(ctx)
+	defer s.ctxPool.Put(ctx)
 	for !close {
 		// Read the HTTP request line
 		message, err := ctx.reader.ReadString('\n')
@@ -424,10 +459,10 @@ func (s *server) handleRequest(ctx *context, method string, url string, w io.Wri
 	_ = h
 	err := handler(ctx)
 	if err != nil {
-		s.errorHandler(ctx, err)
+		s.errHandler(ctx, err)
 	}
 	// Reuse buffer to reduce GC pressure
-	buf := s.bufferPool.Get().(*bytes.Buffer)
+	buf := s.bufPool.Get().(*bytes.Buffer)
 	buf.Reset()
 	buf.WriteString(`HTTP/1.1 `)
 	buf.WriteString(strconv.Itoa(int(ctx.status)))
@@ -443,7 +478,7 @@ func (s *server) handleRequest(ctx *context, method string, url string, w io.Wri
 	buf.WriteString("\r\n")
 	buf.Write(ctx.response.body)
 	w.Write(buf.Bytes())
-	s.bufferPool.Put(buf)
+	s.bufPool.Put(buf)
 }
 
 // newContext allocates a new context with the default state.

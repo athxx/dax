@@ -11,6 +11,7 @@ type Custom struct {
 
 func main() {
 	s := dax.NewServer()
+	s.ShowLogo()
 	s.Prefork() // Enable prefork mode
 
 	s.Use(func(ctx dax.Context) error {
