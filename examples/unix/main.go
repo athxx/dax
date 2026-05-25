@@ -21,6 +21,13 @@ server {
 		proxy_set_header X-Real-IP $remote_addr;
 	}
 }
+
+# test
+
+curl -s --unix-socket /tmp/dax.sock http://localhost/
+
+curl -s --unix-socket /tmp/dax.sock http://localhost/hi
+
 */
 
 func main() {
@@ -31,6 +38,10 @@ func main() {
 	s.ShowLogo()
 	s.Get("/", func(ctx dax.Context) error {
 		return ctx.String("Hello from Unix socket!")
+	})
+
+	s.Get("/hi", func(ctx dax.Context) error {
+		return ctx.String("Hi! Here is a Unix socket example.")
 	})
 
 	// Listen on the pre-created Unix socket

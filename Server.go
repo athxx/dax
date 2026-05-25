@@ -41,6 +41,7 @@ type Server interface {
 	Run(address string) error
 	RunUnix(socketPath string) error
 	SetErrorHandler(handler func(Context, error))
+	SetShutdownTimeout(d time.Duration)
 	ShowLogo()
 	Stop()
 	Use(handlers ...Handler)
@@ -48,20 +49,23 @@ type Server interface {
 
 // server implements the Server interface.
 type server struct {
-	handlers   []Handler
-	ctxPool    sync.Pool
-	notFound   Handler
-	bootMsg    bool
-	prefork    bool
-	router     *Router[Handler]
-	errHandler func(Context, error)
-	ready      chan struct{}
-	stop       chan struct{}
-	bufPool    sync.Pool // Reuse bytes.Buffer to reduce GC pressure.
-	routeSeq   map[string]uint
-	useSeq     uint
-	conns      sync.WaitGroup // Tracks in-flight connections for graceful shutdown.
-	shutdown   atomic.Bool    // Signals handleConnection to stop reading new requests.
+	handlers    []Handler
+	ctxPool     sync.Pool
+	notFound    Handler
+	bootMsg     bool
+	prefork     bool
+	router      *Router[Handler]
+	errHandler  func(Context, error)
+	ready       chan struct{}
+	stop        chan struct{}
+	bufPool     sync.Pool // Reuse bytes.Buffer to reduce GC pressure.
+	routeSeq    map[string]uint
+	useSeq      uint
+	conns       sync.WaitGroup        // Tracks in-flight connections for graceful shutdown.
+	shutdown    atomic.Bool           // Signals handleConnection to stop reading new requests.
+	connsMu     sync.Mutex            // Guards activeConns.
+	activeConns map[net.Conn]struct{} // Open connections, used to force-close on shutdown timeout.
+	shutdownTTL time.Duration         // Max time to wait for in-flight requests; 0 = wait forever.
 }
 
 // NewServer creates a new Server.
@@ -84,8 +88,9 @@ func NewServer() Server {
 		errHandler: func(ctx Context, err error) {
 			log.Println(ctx.Request().Path(), err)
 		},
-		ready: make(chan struct{}),
-		stop:  make(chan struct{}),
+		ready:       make(chan struct{}),
+		stop:        make(chan struct{}),
+		activeConns: make(map[net.Conn]struct{}),
 		bufPool: sync.Pool{
 			New: func() any { return new(bytes.Buffer) },
 		},
@@ -323,8 +328,16 @@ func (s *server) runSingle(network, address string) error {
 				continue
 			}
 			s.conns.Add(1)
+			s.connsMu.Lock()
+			s.activeConns[conn] = struct{}{}
+			s.connsMu.Unlock()
 			go func() {
-				defer s.conns.Done()
+				defer func() {
+					s.connsMu.Lock()
+					delete(s.activeConns, conn)
+					s.connsMu.Unlock()
+					s.conns.Done()
+				}()
 				s.handleConnection(conn)
 			}()
 		}
@@ -336,10 +349,37 @@ func (s *server) runSingle(network, address string) error {
 	case <-stop:
 	case <-s.stop:
 	}
-	// Graceful shutdown: stop accepting new connections, wait for in-flight to finish.
+	// Graceful shutdown: stop accepting new connections immediately, then wake
+	// up any keep-alive connections idling in Read so they exit their loop.
+	// In-flight handlers keep running until they finish or shutdownTimeout fires.
 	s.shutdown.Store(true)
 	listener.Close()
-	s.conns.Wait()
+	s.connsMu.Lock()
+	for c := range s.activeConns {
+		// Past deadline → next Read returns immediately with timeout error.
+		// handleConnection sees shutdown flag and returns.
+		c.SetReadDeadline(time.Now())
+	}
+	s.connsMu.Unlock()
+	done := make(chan struct{})
+	go func() {
+		s.conns.Wait()
+		close(done)
+	}()
+	if s.shutdownTTL > 0 {
+		select {
+		case <-done:
+		case <-time.After(s.shutdownTTL):
+			s.connsMu.Lock()
+			for c := range s.activeConns {
+				c.Close()
+			}
+			s.connsMu.Unlock()
+			<-done
+		}
+	} else {
+		<-done
+	}
 	return nil
 }
 
@@ -381,6 +421,13 @@ func (s *server) Use(handlers ...Handler) {
 // SetErrorHandler sets a custom error handler.
 func (s *server) SetErrorHandler(handler func(Context, error)) {
 	s.errHandler = handler
+}
+
+// SetShutdownTimeout sets the maximum time Stop() will wait for in-flight
+// requests to finish before force-closing remaining connections. Zero means
+// wait forever (the default).
+func (s *server) SetShutdownTimeout(d time.Duration) {
+	s.shutdownTTL = d
 }
 
 // handleConnection reads HTTP requests from a connection and dispatches them.

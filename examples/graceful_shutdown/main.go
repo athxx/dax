@@ -13,6 +13,8 @@ import (
 func main() {
 	s := dax.NewServer()
 	s.ShowLogo()
+	// Wait up to 30s for in-flight requests; force-close anything still open.
+	s.SetShutdownTimeout(30 * time.Second)
 
 	s.Get("/", func(ctx dax.Context) error {
 		return ctx.String("Hello")
@@ -21,7 +23,7 @@ func main() {
 	s.Get("/slow", func(ctx dax.Context) error {
 		// Simulate a long-running request to demonstrate that
 		// graceful shutdown waits for in-flight work to finish.
-		time.Sleep(10 * time.Second)
+		time.Sleep(15 * time.Second)
 		return ctx.String("done")
 	})
 
