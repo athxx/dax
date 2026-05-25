@@ -34,15 +34,12 @@ type Server interface {
 	Patch(path string, handler Handler)
 	Post(path string, handler Handler)
 	Put(path string, handler Handler)
-	Prefork()
 	Ready() chan struct{}
 	Request(method string, path string, headers []Header, body io.Reader) Response
 	Router() *Router[Handler]
 	Run(address string) error
 	RunUnix(socketPath string) error
 	SetErrorHandler(handler func(Context, error))
-	SetShutdownTimeout(d time.Duration)
-	ShowLogo()
 	Stop()
 	Use(handlers ...Handler)
 }
@@ -54,6 +51,7 @@ type server struct {
 	notFound    Handler
 	bootMsg     bool
 	prefork     bool
+	preforkNum  int
 	router      *Router[Handler]
 	errHandler  func(Context, error)
 	ready       chan struct{}
@@ -65,11 +63,36 @@ type server struct {
 	shutdown    atomic.Bool           // Signals handleConnection to stop reading new requests.
 	connsMu     sync.Mutex            // Guards activeConns.
 	activeConns map[net.Conn]struct{} // Open connections, used to force-close on shutdown timeout.
-	shutdownTTL time.Duration         // Max time to wait for in-flight requests; 0 = wait forever.
+	graceful    bool                  // Whether graceful shutdown is enabled.
+	gracefulTTL time.Duration         // Max time to wait for in-flight requests; 0 = wait forever.
+}
+
+type Config struct {
+	// EnablePrefork enables multi-process mode. See Server.Prefork() for details.
+	EnablePrefork bool
+	// PreforkNum specifies the number of child processes to fork in prefork mode.
+	// If zero, defaults to the number of CPUs.
+	PreforkNum int
+	// EnableBootMsg enables the startup message with server info and PID.
+	EnableBootMsg bool
+	// EnableGracefulShutdown enables graceful shutdown on SIGINT/SIGTERM, waiting for in-flight
+	// requests to finish before exiting. See Server.SetShutdownTimeout() for details.
+	EnableGracefulShutdown bool
+	// GracefulShutdownTimeout sets the maximum time Server.Stop() will wait for in-flight
+	// requests to finish before force-closing remaining connections. Zero means wait forever (the default).
+	GracefulShutdownTimeout time.Duration
 }
 
 // NewServer creates a new Server.
-func NewServer() Server {
+func NewServer(cfg ...*Config) Server {
+	config := &Config{}
+	if len(cfg) > 0 {
+		c := cfg[0]
+		if c != nil {
+			config = c
+		}
+	}
+
 	r := &Router[Handler]{}
 	s := &server{
 		router: r,
@@ -94,7 +117,12 @@ func NewServer() Server {
 		bufPool: sync.Pool{
 			New: func() any { return new(bytes.Buffer) },
 		},
-		routeSeq: make(map[string]uint),
+		routeSeq:    make(map[string]uint),
+		bootMsg:     config.EnableBootMsg,
+		prefork:     config.EnablePrefork,
+		preforkNum:  config.PreforkNum,
+		graceful:    config.EnableGracefulShutdown,
+		gracefulTTL: config.GracefulShutdownTimeout,
 	}
 	s.ctxPool.New = func() any { return s.newContext() }
 	return s
@@ -183,17 +211,6 @@ func (s *server) Request(method string, url string, headers []Header, body io.Re
 	return ctx.Response()
 }
 
-// Prefork enables multi-process mode.
-// Forks one child per GOMAXPROCS; the kernel load-balances connections.
-func (s *server) Prefork() {
-	s.prefork = true
-}
-
-// ShowLogo enables the server to print a startup logo with process info.
-func (s *server) ShowLogo() {
-	s.bootMsg = true
-}
-
 // logLogo prints server startup info.
 func (s *server) logLogo(address string, isChild bool, childIndex, totalChildren int) {
 	if !s.bootMsg {
@@ -247,6 +264,9 @@ func (s *server) run(network, address string) error {
 // Unix sockets share the parent's listener fd via fd inheritance.
 func (s *server) runPrefork(network, address string) error {
 	numCPU := runtime.GOMAXPROCS(0)
+	if s.preforkNum > 0 {
+		numCPU = s.preforkNum
+	}
 	files := []*os.File{os.Stdin, os.Stdout, os.Stderr}
 	// Unix sockets can't use SO_REUSEPORT — share one listener fd with children.
 	if network == "unix" {
@@ -349,15 +369,22 @@ func (s *server) runSingle(network, address string) error {
 	case <-stop:
 	case <-s.stop:
 	}
-	// Graceful shutdown: stop accepting new connections immediately, then wake
-	// up any keep-alive connections idling in Read so they exit their loop.
-	// In-flight handlers keep running until they finish or shutdownTimeout fires.
+	// Stop accepting new connections immediately.
 	s.shutdown.Store(true)
 	listener.Close()
+	if !s.graceful {
+		// Graceful shutdown disabled: force-close every active connection and return.
+		s.connsMu.Lock()
+		for c := range s.activeConns {
+			c.Close()
+		}
+		s.connsMu.Unlock()
+		return nil
+	}
+	// Graceful: wake up keep-alive connections idling in Read so they exit their
+	// loop. In-flight handlers keep running until they finish or gracefulTTL fires.
 	s.connsMu.Lock()
 	for c := range s.activeConns {
-		// Past deadline → next Read returns immediately with timeout error.
-		// handleConnection sees shutdown flag and returns.
 		c.SetReadDeadline(time.Now())
 	}
 	s.connsMu.Unlock()
@@ -366,10 +393,10 @@ func (s *server) runSingle(network, address string) error {
 		s.conns.Wait()
 		close(done)
 	}()
-	if s.shutdownTTL > 0 {
+	if s.gracefulTTL > 0 {
 		select {
 		case <-done:
-		case <-time.After(s.shutdownTTL):
+		case <-time.After(s.gracefulTTL):
 			s.connsMu.Lock()
 			for c := range s.activeConns {
 				c.Close()
@@ -421,13 +448,6 @@ func (s *server) Use(handlers ...Handler) {
 // SetErrorHandler sets a custom error handler.
 func (s *server) SetErrorHandler(handler func(Context, error)) {
 	s.errHandler = handler
-}
-
-// SetShutdownTimeout sets the maximum time Stop() will wait for in-flight
-// requests to finish before force-closing remaining connections. Zero means
-// wait forever (the default).
-func (s *server) SetShutdownTimeout(d time.Duration) {
-	s.shutdownTTL = d
 }
 
 // handleConnection reads HTTP requests from a connection and dispatches them.

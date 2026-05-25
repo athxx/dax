@@ -33,9 +33,10 @@ curl -s --unix-socket /tmp/dax.sock http://localhost/hi
 func main() {
 	socketPath := "/tmp/dax.sock"
 
-	s := dax.NewServer()
-	s.Prefork()
-	s.ShowLogo()
+	s := dax.NewServer(&dax.Config{
+		EnableBootMsg: true,
+		EnablePrefork: true,
+	})
 	s.Get("/", func(ctx dax.Context) error {
 		return ctx.String("Hello from Unix socket!")
 	})

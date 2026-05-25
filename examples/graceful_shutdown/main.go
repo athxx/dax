@@ -11,10 +11,12 @@ import (
 )
 
 func main() {
-	s := dax.NewServer()
-	s.ShowLogo()
-	// Wait up to 30s for in-flight requests; force-close anything still open.
-	s.SetShutdownTimeout(30 * time.Second)
+	s := dax.NewServer(&dax.Config{
+		EnableBootMsg:           true,
+		EnablePrefork:           true,
+		EnableGracefulShutdown:  true,
+		GracefulShutdownTimeout: 30 * time.Second,
+	})
 
 	s.Get("/", func(ctx dax.Context) error {
 		return ctx.String("Hello")
