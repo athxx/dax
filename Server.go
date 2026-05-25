@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -59,6 +60,8 @@ type server struct {
 	bufPool    sync.Pool // Reuse bytes.Buffer to reduce GC pressure.
 	routeSeq   map[string]uint
 	useSeq     uint
+	conns      sync.WaitGroup // Tracks in-flight connections for graceful shutdown.
+	shutdown   atomic.Bool    // Signals handleConnection to stop reading new requests.
 }
 
 // NewServer creates a new Server.
@@ -309,15 +312,21 @@ func (s *server) runSingle(network, address string) error {
 	if err != nil {
 		return err
 	}
-	defer listener.Close()
 	s.logLogo(address, isChild != "", childIndex, totalChildren)
 	go func() {
 		for {
 			conn, err := listener.Accept()
 			if err != nil {
+				if s.shutdown.Load() {
+					return
+				}
 				continue
 			}
-			go s.handleConnection(conn)
+			s.conns.Add(1)
+			go func() {
+				defer s.conns.Done()
+				s.handleConnection(conn)
+			}()
 		}
 	}()
 	stop := make(chan os.Signal, 1)
@@ -327,12 +336,21 @@ func (s *server) runSingle(network, address string) error {
 	case <-stop:
 	case <-s.stop:
 	}
+	// Graceful shutdown: stop accepting new connections, wait for in-flight to finish.
+	s.shutdown.Store(true)
+	listener.Close()
+	s.conns.Wait()
 	return nil
 }
 
-// Stop gracefully shuts down the server.
+// Stop gracefully shuts down the server, waiting for in-flight requests to finish.
 func (s *server) Stop() {
-	close(s.stop)
+	select {
+	case <-s.stop:
+		// Already stopped.
+	default:
+		close(s.stop)
+	}
 }
 
 // Router returns the server's router.
@@ -377,6 +395,9 @@ func (s *server) handleConnection(conn net.Conn) {
 	defer conn.Close()
 	defer s.ctxPool.Put(ctx)
 	for !close {
+		if s.shutdown.Load() {
+			return
+		}
 		// Read the HTTP request line
 		message, err := ctx.reader.ReadString('\n')
 		if err != nil {
